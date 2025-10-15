@@ -1,6 +1,7 @@
 // Name: Jevon Harding-Lovell
 // ID Number: 400008802
 // Switch-Case
+
 /*you will need a serial receive function that lets you know if a character has arrived - locate an appropriate 
 library for your compiler (2 marks)
 the FSM transitions should only take place on a system tick - if the system tick is a factor of 500ms you will 
@@ -149,3 +150,4 @@ void app_main(void)
 
 
 // Wsl and test the code*/
+
