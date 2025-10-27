@@ -1,0 +1,121 @@
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_system.h"
+#include "driver/gpio.h"
+#include "esp_timer.h"
+
+#define LED_PIN 2
+#define UART_BAUD 115200
+//#define STATUS_INTERVAL_MS 1000
+
+const int LED_ON = 3;   // LED On task
+const int LED_OFF = 2;  // LED Off task 
+const int STAT = 1;     // Status task
+
+static SemaphoreHandle_t g_ledMutex;
+
+static void led_gpio_init(void)
+{
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
+    gpio_output_set(0, 0, (1 << LED_PIN), 0);
+}
+
+static void led_write(int level)
+{
+    if (level)
+    {
+        GPIO_OUTPUT_SET(LED_PIN, 1);
+    }
+    else
+    {
+        GPIO_OUTPUT_SET(LED_PIN, 0);
+    }
+}
+
+void taskLedOn(void *param)
+{
+    (void)param;
+
+    for (;;) 
+    {
+        if (xSemaphoreTake(g_ledMutex, portMAX_DELAY) == pdTRUE)
+        {
+            led_write(1);
+        uint32_t timer_start = system_get_time();
+        while ((system_get_time() - timer_start)< 500000)
+        {
+
+        }
+        xSemaphoreGive(g_ledMutex);
+        }
+        taskYIELD();
+    }
+}
+
+void taskLedOff (void *param)
+{
+    (void)param;
+    const TickType_t delay_ticks = pdMS_TO_TICKS(1000);
+
+    for (;;)
+    {
+        if (xSemaphoreTake(g_ledMutex, portMAX_DELAY) == pdTRUE)
+        {
+            led_write(0);
+            xSemaphoreGive(g_ledMutex);
+        }
+        vTaskDelay(delay_ticks);
+    }
+}
+
+void taskStatus (void *param)
+{
+    (void)param;
+    uint32_t iteration = 0;
+    const TickType_t monitor_delay = pdMS_TO_TICKS(1000);
+    
+    for (;;)
+    {
+        printf("Iteration: %lu, Free Heap: %u bytes\n", iteration++, system_get_free_heap_size());
+        vTaskDelay(monitor_delay);
+    }
+}
+
+void app_main(void)
+{
+    uart_div_modify(0, UART_CLK_FREQ/UART_BAUD);
+    led_gpio_init();
+    led_write(0);
+
+    g_ledMutex = xSemaphoreCreateMutex();
+    if (g_ledMutex == NULL)
+    {
+        printf ("Failed to create mutex\n");
+        return;
+    }
+
+    BaseType_t result;
+
+    result = xTaskCreate(taskLedOn, "LED_ON", 1024, NULL, LED_ON, NULL);
+    if (result != pdPASS) 
+    {
+        printf("Failed to create LED_ON task\n");
+        return;
+    }
+    
+    result = xTaskCreate(taskLedOff, "LED_OFF", 1024, NULL, LED_OFF, NULL);
+    if (result != pdPASS) 
+    {
+        printf("Failed to create LED_OFF task\n");
+        return;
+    }
+    
+    result = xTaskCreate(taskStatus, "STATUS", 1024, NULL, STAT, NULL);
+    if (result != pdPASS) 
+    {
+        printf("Failed to create STATUS task\n");
+        return;
+    }
+}
