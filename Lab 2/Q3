@@ -1,0 +1,147 @@
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_system.h"
+#include "driver/gpio.h"
+
+#define LED_PIN 2
+#define UART_BAUD 115200
+
+#ifdef SAME_PRIORITY
+    const int LED_ON = 2;  
+    const int LED_OFF = 2;
+    const int STAT = 2;
+#elif defined(NO_INHERITANCE)
+    const int LED_ON = 3;  
+    const int LED_OFF = 2;   
+    const int STAT = 1;    
+#else  // Priority inheritance (normal mutex behavior)
+    const int LED_ON = 3;  
+    const int LED_OFF = 2; 
+    const int STAT = 1;    
+#endif
+
+static SemaphoreHandle_t g_ledMutex;
+static uint32_t led_on_count = 0;
+static uint32_t led_off_count = 0;
+static uint32_t status_count = 0;
+
+static void led_gpio_init(void) 
+{
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
+    gpio_output_set(0, 0, (1 << LED_PIN), 0);
+}
+
+static void led_write(int level) 
+{
+    if (level) 
+    {
+        GPIO_OUTPUT_SET(LED_PIN, 1);
+    } else 
+    {
+        GPIO_OUTPUT_SET(LED_PIN, 0);
+    }
+}
+
+void taskLedOn(void *param) 
+{
+    (void)param;
+    uint32_t local_count = 0;
+    
+    for (;;) 
+    {
+        if (xSemaphoreTake(g_ledMutex, portMAX_DELAY) == pdTRUE) 
+        {
+            led_write(1);
+            local_count++;
+            led_on_count = local_count;
+            
+            printf("LED_ON[%lu] - Got mutex, turning ON\n", local_count);
+            
+            uint32_t timer_start = system_get_time();
+            while ((system_get_time() - timer_start) < 500000) 
+            {
+               
+            }
+            
+            xSemaphoreGive(g_ledMutex);
+            printf("LED_ON[%lu] - Released mutex\n", local_count);
+        }
+        taskYIELD();
+    }
+}
+
+void taskLedOff(void *param) 
+{
+    (void)param;
+    const TickType_t delay_ticks = pdMS_TO_TICKS(1000);
+    uint32_t local_count = 0;
+
+    for (;;) 
+    {
+        if (xSemaphoreTake(g_ledMutex, portMAX_DELAY) == pdTRUE) 
+        {
+            led_write(0);
+            local_count++;
+            led_off_count = local_count;
+            
+            printf("LED_OFF[%lu] - Got mutex, turning OFF\n", local_count);
+            xSemaphoreGive(g_ledMutex);
+            printf("LED_OFF[%lu] - Released mutex\n", local_count);
+        }
+        vTaskDelay(delay_ticks);
+    }
+}
+
+void taskStatus(void *param) 
+{
+    (void)param;
+    uint32_t local_count = 0;
+    const TickType_t monitor_delay = pdMS_TO_TICKS(1000);
+    
+    for (;;) 
+    {
+        local_count++;
+        status_count = local_count;
+        
+        printf("STATUS[%lu] - LED_ON: %lu, LED_OFF: %lu, Free Heap: %u bytes, Priority: ON=%d/OFF=%d/STAT=%d\n", 
+               local_count, led_on_count, led_off_count, system_get_free_heap_size(),
+               LED_ON, LED_OFF, STAT);
+        
+        vTaskDelay(monitor_delay);
+    }
+}
+
+void app_main(void) 
+{
+    uart_div_modify(0, UART_CLK_FREQ/UART_BAUD);
+    
+#ifdef SAME_PRIORITY
+    printf("SAME PRIORITY (Run to Completion)\n");
+#elif defined(NO_INHERITANCE)
+    printf("DIFFERENT PRIORITIES (No Inheritance)\n"); 
+#else
+    printf("DIFFERENT PRIORITIES (With Inheritance - DEFAULT)\n");
+#endif
+    
+    led_gpio_init();
+    led_write(0);
+
+    g_ledMutex = xSemaphoreCreateMutex();
+    if (g_ledMutex == NULL) 
+    {
+        printf("Failed to create mutex\n");
+        return;
+    }
+
+    BaseType_t result;
+    result = xTaskCreate(taskLedOn, "LED_ON", 1024, NULL, LED_ON, NULL);
+    if (result != pdPASS) return;
+    
+    result = xTaskCreate(taskLedOff, "LED_OFF", 1024, NULL, LED_OFF, NULL);
+    if (result != pdPASS) return;
+    
+    result = xTaskCreate(taskStatus, "STATUS", 1024, NULL, STAT, NULL);
+    if (result != pdPASS) return;
+}
