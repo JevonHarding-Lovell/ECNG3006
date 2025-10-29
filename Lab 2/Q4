@@ -60,7 +60,8 @@ static inline void led_write(int level)
     }
 }
 
-static void taskLedOn(void *param) {
+static void taskLedOn(void *param) 
+{
     (void)param;
     for (;;) 
     {
@@ -75,7 +76,8 @@ static void taskLedOn(void *param) {
     }
 }
   
-static void taskLedOff(void *param) {
+static void taskLedOff(void *param) 
+{
     (void)param;
     for (;;) {
         xSemaphoreTake(g_ledMutex, portMAX_DELAY);
@@ -95,14 +97,7 @@ static void taskStatus(void *param)
     {
         uint32_t idle_delta = g_idleCounter - last_idle_count;
         last_idle_count = g_idleCounter;
-        
-        printf("[STATUS] t=%lu s, idle_count=%lu, idle_delta=%lu, blocked_instances=%lu, free_heap=%u\r\n",
-               (unsigned long)tick++,
-               (unsigned long)g_idleCounter,
-               (unsigned long)idle_delta, 
-               (unsigned long)g_blockedInstances,
-               (unsigned int)system_get_free_heap_size());
-               
+        printf("[STATUS] t=%lu s, idle_count=%lu, idle_delta=%lu, blocked_instances=%lu, free_heap=%u\r\n", (unsigned long)tick++, (unsigned long)g_idleCounter, (unsigned long)idle_delta, (unsigned long)g_blockedInstances, (unsigned int)system_get_free_heap_size());
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
