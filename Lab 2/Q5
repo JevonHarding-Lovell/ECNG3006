@@ -1,0 +1,129 @@
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_system.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
+
+#define LED_PIN 2
+#define UART_BAUD 115200
+#define LED_ON 3
+#define LED_OFF 2 
+#define STAT 1
+
+static uint32_t g_idleCounter = 0;
+static uint32_t g_blockedInstances = 0;
+static TickType_t g_lastIdleTime = 0;
+static bool g_systemIdle = false;
+
+static SemaphoreHandle_t g_ledSemaphore; 
+
+void vApplicationIdleHook(void) 
+{
+    g_idleCounter++;
+    TickType_t current_time = xTaskGetTickCount();
+    
+    if (!g_systemIdle) 
+    {
+        g_systemIdle = true;
+        g_blockedInstances++;
+        printf("[IDLE] System idle at tick: %lu\r\n", current_time);
+    }
+    
+    g_lastIdleTime = current_time;
+}
+  
+void vApplicationTickHook(void) 
+{
+    if (g_systemIdle) 
+    {
+        g_systemIdle = false;
+        printf("[IDLE] System resumed\r\n");
+    }
+}
+
+static void led_gpio_init(void) 
+{
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
+    gpio_output_set(0, 0, (1 << LED_PIN), 0);
+}
+
+static inline void led_write(int level) 
+{
+    if (level) 
+    {
+        GPIO_OUTPUT_SET(LED_PIN, 1);
+    } else 
+    {
+        GPIO_OUTPUT_SET(LED_PIN, 0);
+    }
+}
+
+static void taskLedOn(void *param) 
+{
+    (void)param;
+    for (;;) 
+    {
+        xSemaphoreTake(g_ledSemaphore, portMAX_DELAY);  
+        led_write(1);
+        const uint32_t start_us = system_get_time();
+        while ((uint32_t)(system_get_time() - start_us) < 500000U) 
+        {
+        }
+        xSemaphoreGive(g_ledSemaphore);
+        taskYIELD();
+    }
+}
+  
+static void taskLedOff(void *param) 
+{
+    (void)param;
+    for (;;) {
+        xSemaphoreTake(g_ledSemaphore, portMAX_DELAY);
+        led_write(0);
+        xSemaphoreGive(g_ledSemaphore);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+static void taskStatus(void *param) 
+{
+    (void)param;
+    uint32_t tick = 0;
+    uint32_t last_idle_count = 0;
+    
+    for (;;) 
+    {
+        uint32_t idle_delta = g_idleCounter - last_idle_count;
+        last_idle_count = g_idleCounter;
+        
+        printf("[STATUS] t=%lu s, idle_count=%lu, idle_delta=%lu, blocked_instances=%lu, free_heap=%u\r\n",
+               (unsigned long)tick++,
+               (unsigned long)g_idleCounter,
+               (unsigned long)idle_delta, 
+               (unsigned long)g_blockedInstances,
+               (unsigned int)system_get_free_heap_size());
+               
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void app_main(void) 
+{
+    uart_div_modify(0, UART_CLK_FREQ / UART_BAUD);
+    led_gpio_init();
+    led_write(0);
+
+    g_ledSemaphore = xSemaphoreCreateBinary();
+    configASSERT(g_ledSemaphore != NULL);
+    xSemaphoreGive(g_ledSemaphore);
+    
+    BaseType_t result;
+    result = xTaskCreate(taskLedOn,  "LED_ON", 1024, NULL, LED_ON, NULL);
+    configASSERT(result == pdPASS);
+    result = xTaskCreate(taskLedOff, "LED_OFF", 1024, NULL, LED_OFF, NULL);
+    configASSERT(result == pdPASS);
+    result = xTaskCreate(taskStatus, "STATUS", 2048, NULL, STAT, NULL);
+    configASSERT(result == pdPASS);
+}
