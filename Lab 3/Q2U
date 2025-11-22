@@ -1,0 +1,79 @@
+#include "rtc_peripheral.h"
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TEST_TAG = "RTC_UNIT_TEST";
+
+void app_main(void)
+{
+    ESP_LOGI(TEST_TAG);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+
+    ESP_LOGI(TEST_TAG, "Step 1: Initializing RTC peripheral");
+    if (!init_rtc()) 
+    {
+        ESP_LOGE(TEST_TAG, "RTC initialization failed!");
+        return;
+    }
+    ESP_LOGI(TEST_TAG, "RTC initialized successfully");
+    
+    int test_cycle = 0;
+    while (test_cycle < 5) 
+    {
+        ESP_LOGI(TEST_TAG, "=== Test Cycle %d ===", ++test_cycle);
+        
+        time_t current_time = singleread_rtc_time();
+        ESP_LOGI(TEST_TAG, "READ: Current RTC time: %lld", (long long)current_time);
+        
+
+        time_t new_time = current_time + (test_cycle * 60);
+        if (singlewrite_rtc_time(new_time)) 
+        {
+            ESP_LOGI(TEST_TAG, "WRITE: Successfully set time to %lld", (long long)new_time);
+        }
+        else 
+        {
+            ESP_LOGE(TEST_TAG, "WRITE: Failed to set time");
+        }
+        
+        time_t verify_time = singleread_rtc_time();
+        ESP_LOGI(TEST_TAG, "VERIFY: Time after write: %lld", (long long)verify_time);
+
+        uint8_t buffer[64];
+        int bytes_read = burstread_rtc_data(buffer, sizeof(buffer));
+        ESP_LOGI(TEST_TAG, "BURST READ: %d bytes read", bytes_read);
+        
+        ESP_LOGI(TEST_TAG, "Testing 2-second alarm...");
+        start_rtc_alarm(2);
+        
+        int wait_count = 0;
+        while (!is_done_rtc_alarm() && wait_count < 5) 
+        {
+            time_t temp_read = singleread_rtc_time();
+            ESP_LOGI(TEST_TAG, "Alarm wait %d - Time: %lld", wait_count + 1, (long long)temp_read);
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            wait_count++;
+        }
+        
+        if (is_done_rtc_alarm()) 
+        {
+            ESP_LOGI(TEST_TAG, "Alarm completed successfully");
+        }
+        
+        ESP_LOGI(TEST_TAG, "Cycle %d completed", test_cycle);
+        vTaskDelay(3000 / portTICK_PERIOD_MS);
+    }
+    
+    ESP_LOGI(TEST_TAG, "All test cycles completed successfully!");
+    
+    while (1) 
+    {
+        time_t final_time = singleread_rtc_time();
+        ESP_LOGI(TEST_TAG, "Final continuous read: %lld", (long long)final_time);
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
