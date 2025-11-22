@@ -1,1 +1,246 @@
+#include "Q2h.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#include "esp_log.h"
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+#include "sntp.h"
+#include "sys/time.h"
+#include "esp_system.h"
+
+static const char *TAG = "RTC_DRV";
+static TimerHandle_t rtc_alarm_timer = NULL;
+static volatile bool rtc_alarm_active = false;
+static volatile bool rtc_alarm_done = false;
+
+static void rtc_alarm_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    rtc_alarm_done = true;
+    rtc_alarm_active = false;
+    ESP_LOGI(TAG, "RTC alarm: timer callback executed, alarm_done set");
+}
+
+static void rtc_platform_sntp_init(const char *server)
+{
+    ESP_LOGI(TAG, "Initializing SNTP (server=%s)", server ? server : "(default)");
+    sntp_stop();
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    if (server) 
+    {
+        sntp_setservername(0, (char *)server);
+    }
+    sntp_init();
+}
+
+static void rtc_platform_store_time(time_t t)
+{
+    uint64_t val = (uint64_t)t;
+#if defined(ESP_PLATFORM)
+    system_rtc_mem_write(64, &val, sizeof(val));
+    ESP_LOGI(TAG, "Stored time to RTC memory: %llu", (unsigned long long)val);
+#endif
+}
+
+static bool rtc_platform_restore_time(time_t *out_t)
+{
+    if (!out_t) return false;
+#if defined(ESP_PLATFORM)
+    uint64_t val = 0;
+    bool ok = system_rtc_mem_read(64, &val, sizeof(val));
+    if (ok && val > 1609459200ULL) 
+    { 
+        *out_t = (time_t)val;
+        ESP_LOGI(TAG, "Restored time from RTC memory: %llu", (unsigned long long)val);
+        return true;
+    }
+#endif
+    return false;
+}
+
+bool init_rtc(void)
+{
+    rtc_platform_sntp_init("pool.ntp.org");
+    ESP_LOGI(TAG, "init_rtc: starting");
+    time_t now;
+    time(&now);
+    if (now < 1609459200) 
+    {
+        time_t stored;
+        if (rtc_platform_restore_time(&stored)) 
+        {
+            struct timeval tv = { .tv_sec = stored, .tv_usec = 0 };
+            settimeofday(&tv, NULL);
+            ESP_LOGI(TAG, "init_rtc: set time from RTC memory to %lld", (long long)stored);
+        } 
+        else 
+        {
+            ESP_LOGW(TAG, "init_rtc: time not set and no RTC memory available");
+        }
+    } 
+    else 
+    {
+        ESP_LOGI(TAG, "init_rtc: time already set (epoch=%lld)", (long long)now);
+    }
+
+    rtc_alarm_active = false;
+    rtc_alarm_done = false;
+
+    ESP_LOGI(TAG, "init_rtc: complete");
+    return true;
+}
+
+bool start_rtc_alarm(uint32_t alarm_seconds)
+{
+    if (alarm_seconds == 0) 
+    {
+        ESP_LOGE(TAG, "start_rtc_alarm: invalid duration 0");
+        return false;
+    }
+
+    if (rtc_alarm_timer != NULL) 
+    {
+        xTimerDelete(rtc_alarm_timer, 0);
+        rtc_alarm_timer = NULL;
+    }
+
+    TickType_t ticks = pdMS_TO_TICKS((uint32_t)alarm_seconds * 1000UL);
+    rtc_alarm_timer = xTimerCreate("rtc_alarm", ticks, pdFALSE, NULL, rtc_alarm_timer_cb);
+    if (rtc_alarm_timer == NULL) 
+    {
+        ESP_LOGE(TAG, "start_rtc_alarm: failed to create timer");
+        return false;
+    }
+
+    if (xTimerStart(rtc_alarm_timer, 0) != pdPASS) 
+    {
+        ESP_LOGE(TAG, "start_rtc_alarm: failed to start timer");
+        xTimerDelete(rtc_alarm_timer, 0);
+        rtc_alarm_timer = NULL;
+        return false;
+    }
+
+    rtc_alarm_active = true;
+    rtc_alarm_done = false;
+    ESP_LOGI(TAG, "start_rtc_alarm: alarm scheduled in %u seconds", (unsigned)alarm_seconds);
+    return true;
+}
+
+bool stop_rtc_alarm(void)
+{
+    if (!rtc_alarm_active && !rtc_alarm_done) 
+    {
+        ESP_LOGW(TAG, "stop_rtc_alarm: no active alarm");
+        return false;
+    }
+
+    if (rtc_alarm_timer != NULL) 
+    {
+        xTimerStop(rtc_alarm_timer, 0);
+        xTimerDelete(rtc_alarm_timer, 0);
+        rtc_alarm_timer = NULL;
+    }
+
+    rtc_alarm_active = false;
+    rtc_alarm_done = false;
+    ESP_LOGI(TAG, "stop_rtc_alarm: alarm stopped and cleared");
+    return true;
+}
+
+bool is_done_rtc_alarm(void)
+{
+    return rtc_alarm_done;
+}
+
+time_t singleread_rtc_time(void)
+{
+    time_t now;
+    time(&now);
+    return now;
+}
+
+bool singlewrite_rtc_time(time_t new_time)
+{
+    if (new_time <= 0) 
+    {
+        ESP_LOGE(TAG, "singlewrite_rtc_time: invalid time");
+        return false;
+    }
+
+    struct timeval tv = { .tv_sec = new_time, .tv_usec = 0 };
+    if (settimeofday(&tv, NULL) != 0) 
+    {
+        ESP_LOGE(TAG, "singlewrite_rtc_time: settimeofday failed");
+        return false;
+    }
+
+    rtc_platform_store_time(new_time);
+    ESP_LOGI(TAG, "singlewrite_rtc_time: time set to %lld", (long long)new_time);
+    return true;
+}
+
+int burstread_rtc_data(uint8_t *buffer, int max_bytes)
+{
+    if (buffer == NULL || max_bytes <= 0) return -1;
+
+    time_t now = singleread_rtc_time();
+
+    if (max_bytes >= (int)sizeof(uint64_t)) 
+    {
+        uint64_t v = (uint64_t)now;
+        memcpy(buffer, &v, sizeof(v));
+        return (int)sizeof(v);
+    } 
+    else if (max_bytes >= (int)sizeof(uint32_t)) 
+    {
+        uint32_t v = (uint32_t)now;
+        memcpy(buffer, &v, sizeof(v));
+        return (int)sizeof(v);
+    } 
+    else 
+    {
+        int n = snprintf((char*)buffer, (size_t)max_bytes, "%lld", (long long)now);
+        return (n >= max_bytes) ? (max_bytes - 1) : n;
+    }
+}
+
+bool burstwrite_rtc_data(const uint8_t *data, int data_len)
+{
+    if (data == NULL || data_len <= 0) return false;
+
+    if (data_len == (int)sizeof(uint64_t)) 
+    {
+        uint64_t v;
+        memcpy(&v, data, sizeof(v));
+        return singlewrite_rtc_time((time_t)v);
+    } 
+    else if (data_len == (int)sizeof(uint32_t)) 
+    {
+        uint32_t v;
+        memcpy(&v, data, sizeof(v));
+        return singlewrite_rtc_time((time_t)v);
+    } 
+    else 
+    {
+        char tmp[32] = {0};
+        int to_copy = (data_len < (int)sizeof(tmp)-1) ? data_len : (int)sizeof(tmp)-1;
+        memcpy(tmp, data, to_copy);
+        tmp[to_copy] = '\0';
+        char *endptr = NULL;
+        unsigned long long v = strtoull(tmp, &endptr, 10);
+        if (endptr != tmp) 
+        {
+            return singlewrite_rtc_time((time_t)v);
+        }
+    }
+
+    ESP_LOGE(TAG, "burstwrite_rtc_data: unrecognized payload format");
+    return false;
+}
+
 
